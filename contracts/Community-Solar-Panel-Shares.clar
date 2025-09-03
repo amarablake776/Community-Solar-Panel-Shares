@@ -7,8 +7,10 @@
 (define-constant err-panel-inactive (err u105))
 (define-constant err-unauthorized (err u106))
 (define-constant err-invalid-price (err u107))
+(define-constant err-no-dividend-pool (err u108))
 
 (define-data-var next-panel-id uint u1)
+(define-data-var dividend-rate uint u10)
 (define-data-var total-energy-produced uint u0)
 (define-data-var total-rewards-distributed uint u0)
 
@@ -60,6 +62,16 @@
         height: uint,
     }
     uint
+)
+
+(define-map dividend-pool
+    uint
+    uint
+)
+
+(define-map shareholder-registry
+    uint
+    (list 100 principal)
 )
 
 (define-public (register-panel
@@ -131,6 +143,17 @@
             (+ current-user-shares shares-amount)
         )
 
+        (let ((current-shareholders (default-to (list) (map-get? shareholder-registry panel-id))))
+            (if (is-none (index-of? current-shareholders tx-sender))
+                (map-set shareholder-registry panel-id
+                    (unwrap!
+                        (as-max-len? (append current-shareholders tx-sender) u100)
+                        err-invalid-amount
+                    ))
+                true
+            )
+        )
+
         (ok shares-amount)
     )
 )
@@ -157,6 +180,19 @@
 
         (var-set total-energy-produced
             (+ (var-get total-energy-produced) energy-amount)
+        )
+
+        (let ((dividend-amount (/ (* energy-amount (var-get dividend-rate)) u100)))
+            (if (> dividend-amount u0)
+                (begin
+                    (map-set dividend-pool panel-id
+                        (+ (default-to u0 (map-get? dividend-pool panel-id))
+                            dividend-amount
+                        ))
+                    (try! (distribute-dividends panel-id))
+                )
+                true
+            )
         )
 
         (ok energy-amount)
@@ -290,6 +326,17 @@
 
         (map-set user-total-shares seller (- seller-total-shares shares-amount))
         (map-set user-total-shares tx-sender (+ buyer-total-shares shares-amount))
+
+        (let ((current-shareholders (default-to (list) (map-get? shareholder-registry panel-id))))
+            (if (is-none (index-of? current-shareholders tx-sender))
+                (map-set shareholder-registry panel-id
+                    (unwrap!
+                        (as-max-len? (append current-shareholders tx-sender) u100)
+                        err-invalid-amount
+                    ))
+                true
+            )
+        )
 
         (if (is-eq (get shares offer-data) shares-amount)
             (map-delete share-offers {
@@ -433,4 +480,80 @@
         panel-data (ok (get active panel-data))
         err-not-found
     )
+)
+
+(define-private (distribute-dividends (panel-id uint))
+    (let (
+            (panel-data (unwrap! (map-get? panels panel-id) err-not-found))
+            (shareholders (default-to (list) (map-get? shareholder-registry panel-id)))
+            (pool-amount (default-to u0 (map-get? dividend-pool panel-id)))
+            (total-shares (get total-shares panel-data))
+        )
+        (asserts! (> pool-amount u0) err-no-dividend-pool)
+        (map-set dividend-pool panel-id u0)
+        (fold distribute-to-shareholder shareholders {
+            panel-id: panel-id,
+            pool-amount: pool-amount,
+            total-shares: total-shares,
+            remaining-pool: pool-amount,
+        })
+        (ok true)
+    )
+)
+
+(define-private (distribute-to-shareholder
+        (shareholder principal)
+        (context {
+            panel-id: uint,
+            pool-amount: uint,
+            total-shares: uint,
+            remaining-pool: uint,
+        })
+    )
+    (let (
+            (user-shares-data (default-to {
+                shares: u0,
+                last-claim: u0,
+            }
+                (map-get? panel-shares {
+                    panel-id: (get panel-id context),
+                    holder: shareholder,
+                })
+            ))
+            (user-shares (get shares user-shares-data))
+            (dividend (/ (* (get pool-amount context) user-shares)
+                (get total-shares context)
+            ))
+        )
+        (if (and (> user-shares u0) (> dividend u0))
+            (begin
+                (var-set total-rewards-distributed
+                    (+ (var-get total-rewards-distributed) dividend)
+                )
+                context
+            )
+            context
+        )
+    )
+)
+
+(define-public (set-dividend-rate (new-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-rate u50) err-invalid-amount)
+        (var-set dividend-rate new-rate)
+        (ok new-rate)
+    )
+)
+
+(define-read-only (get-dividend-rate)
+    (var-get dividend-rate)
+)
+
+(define-read-only (get-dividend-pool (panel-id uint))
+    (default-to u0 (map-get? dividend-pool panel-id))
+)
+
+(define-read-only (get-panel-shareholders (panel-id uint))
+    (default-to (list) (map-get? shareholder-registry panel-id))
 )
