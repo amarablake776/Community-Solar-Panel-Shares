@@ -1,0 +1,21 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  tests:
+    name: "Community Solar Panel Shares"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v3
+      - name: "Check contract syntax"
+        uses: docker://hirosystems/clarinet:latest
+        with:
+          args: check
+      - name: "Setup Node.js"
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: "Install dependencies"
+        run: npm install
+      - name: "Run tests"
+        run: npm test

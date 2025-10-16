@@ -8,11 +8,16 @@
 (define-constant err-unauthorized (err u106))
 (define-constant err-invalid-price (err u107))
 (define-constant err-no-dividend-pool (err u108))
+(define-constant err-maintenance-not-due (err u109))
+(define-constant err-maintenance-already-scheduled (err u110))
+(define-constant err-invalid-maintenance-type (err u111))
 
 (define-data-var next-panel-id uint u1)
 (define-data-var dividend-rate uint u10)
 (define-data-var total-energy-produced uint u0)
 (define-data-var total-rewards-distributed uint u0)
+(define-data-var total-maintenance-cost uint u0)
+(define-data-var next-maintenance-id uint u1)
 
 (define-map panels
     uint
@@ -72,6 +77,38 @@
 (define-map shareholder-registry
     uint
     (list 100 principal)
+)
+
+(define-map panel-maintenance-schedule
+    {
+        panel-id: uint,
+        maintenance-type: (string-ascii 50),
+    }
+    {
+        scheduled-height: uint,
+        due-height: uint,
+        estimated-cost: uint,
+        priority: uint,
+        scheduled-by: principal,
+    }
+)
+
+(define-map maintenance-records
+    uint
+    {
+        panel-id: uint,
+        maintenance-type: (string-ascii 50),
+        performed-at: uint,
+        actual-cost: uint,
+        performed-by: principal,
+        efficiency-impact: uint,
+        notes: (string-ascii 200),
+    }
+)
+
+(define-map panel-maintenance-history
+    uint
+    (list 50 uint)
 )
 
 (define-public (register-panel
@@ -443,6 +480,8 @@
         next-panel-id: (var-get next-panel-id),
         total-energy-produced: (var-get total-energy-produced),
         total-rewards-distributed: (var-get total-rewards-distributed),
+        total-maintenance-cost: (var-get total-maintenance-cost),
+        next-maintenance-id: (var-get next-maintenance-id),
     }
 )
 
@@ -537,6 +576,132 @@
     )
 )
 
+(define-public (schedule-maintenance
+        (panel-id uint)
+        (maintenance-type (string-ascii 50))
+        (due-blocks uint)
+        (estimated-cost uint)
+        (priority uint)
+    )
+    (let (
+            (panel-data (unwrap! (map-get? panels panel-id) err-not-found))
+            (due-height (+ stacks-block-height due-blocks))
+        )
+        (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
+        (asserts! (get active panel-data) err-panel-inactive)
+        (asserts! (> (len maintenance-type) u0) err-invalid-maintenance-type)
+        (asserts! (> due-blocks u0) err-invalid-amount)
+        (asserts! (> estimated-cost u0) err-invalid-amount)
+        (asserts! (<= priority u5) err-invalid-amount)
+        (asserts!
+            (is-none (map-get? panel-maintenance-schedule {
+                panel-id: panel-id,
+                maintenance-type: maintenance-type,
+            }))
+            err-maintenance-already-scheduled
+        )
+        
+        (map-set panel-maintenance-schedule {
+            panel-id: panel-id,
+            maintenance-type: maintenance-type,
+        } {
+            scheduled-height: stacks-block-height,
+            due-height: due-height,
+            estimated-cost: estimated-cost,
+            priority: priority,
+            scheduled-by: tx-sender,
+        })
+        
+        (ok due-height)
+    )
+)
+
+(define-public (record-maintenance
+        (panel-id uint)
+        (maintenance-type (string-ascii 50))
+        (actual-cost uint)
+        (efficiency-impact uint)
+        (notes (string-ascii 200))
+    )
+    (let (
+            (panel-data (unwrap! (map-get? panels panel-id) err-not-found))
+            (maintenance-id (var-get next-maintenance-id))
+            (current-history (default-to (list) (map-get? panel-maintenance-history panel-id)))
+            (scheduled-maintenance (map-get? panel-maintenance-schedule {
+                panel-id: panel-id,
+                maintenance-type: maintenance-type,
+            }))
+        )
+        (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
+        (asserts! (get active panel-data) err-panel-inactive)
+        (asserts! (> actual-cost u0) err-invalid-amount)
+        (asserts! (<= efficiency-impact u100) err-invalid-amount)
+        
+        ;; Record the maintenance
+        (map-set maintenance-records maintenance-id {
+            panel-id: panel-id,
+            maintenance-type: maintenance-type,
+            performed-at: stacks-block-height,
+            actual-cost: actual-cost,
+            performed-by: tx-sender,
+            efficiency-impact: efficiency-impact,
+            notes: notes,
+        })
+        
+        ;; Update maintenance history
+        (map-set panel-maintenance-history panel-id
+            (unwrap!
+                (as-max-len? (append current-history maintenance-id) u50)
+                err-invalid-amount
+            )
+        )
+        
+        ;; Remove from scheduled maintenance if it exists
+        (if (is-some scheduled-maintenance)
+            (map-delete panel-maintenance-schedule {
+                panel-id: panel-id,
+                maintenance-type: maintenance-type,
+            })
+            true
+        )
+        
+        ;; Update total maintenance cost
+        (var-set total-maintenance-cost
+            (+ (var-get total-maintenance-cost) actual-cost)
+        )
+        
+        ;; Increment maintenance ID
+        (var-set next-maintenance-id (+ maintenance-id u1))
+        
+        (ok maintenance-id)
+    )
+)
+
+(define-public (cancel-scheduled-maintenance
+        (panel-id uint)
+        (maintenance-type (string-ascii 50))
+    )
+    (let (
+            (panel-data (unwrap! (map-get? panels panel-id) err-not-found))
+            (scheduled-maintenance (unwrap!
+                (map-get? panel-maintenance-schedule {
+                    panel-id: panel-id,
+                    maintenance-type: maintenance-type,
+                })
+                err-not-found
+            ))
+        )
+        (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
+        
+        (map-delete panel-maintenance-schedule {
+            panel-id: panel-id,
+            maintenance-type: maintenance-type,
+        })
+        
+        (ok true)
+    )
+)
+
 (define-public (set-dividend-rate (new-rate uint))
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -556,4 +721,97 @@
 
 (define-read-only (get-panel-shareholders (panel-id uint))
     (default-to (list) (map-get? shareholder-registry panel-id))
+)
+
+(define-read-only (get-scheduled-maintenance
+        (panel-id uint)
+        (maintenance-type (string-ascii 50))
+    )
+    (map-get? panel-maintenance-schedule {
+        panel-id: panel-id,
+        maintenance-type: maintenance-type,
+    })
+)
+
+(define-read-only (get-maintenance-record (maintenance-id uint))
+    (map-get? maintenance-records maintenance-id)
+)
+
+(define-read-only (get-panel-maintenance-history (panel-id uint))
+    (default-to (list) (map-get? panel-maintenance-history panel-id))
+)
+
+(define-read-only (get-maintenance-stats)
+    {
+        total-maintenance-cost: (var-get total-maintenance-cost),
+        next-maintenance-id: (var-get next-maintenance-id),
+    }
+)
+
+(define-read-only (calculate-maintenance-adjusted-reward
+        (panel-id uint)
+        (user principal)
+    )
+    (let (
+            (panel-data (unwrap! (map-get? panels panel-id) (err u0)))
+            (user-shares-data (unwrap!
+                (map-get? panel-shares {
+                    panel-id: panel-id,
+                    holder: user,
+                })
+                (err u0)
+            ))
+            (user-shares (get shares user-shares-data))
+            (total-shares (get total-shares panel-data))
+            (panel-energy (get energy-produced panel-data))
+            (maintenance-history (default-to (list) (map-get? panel-maintenance-history panel-id)))
+            (total-efficiency-impact (fold calculate-efficiency-impact maintenance-history u0))
+            (efficiency-factor (if (> total-efficiency-impact u0)
+                (+ u100 (if (< total-efficiency-impact u50) total-efficiency-impact u50))
+                u100
+            ))
+            (adjusted-energy (/ (* panel-energy efficiency-factor) u100))
+            (reward-per-share (/ adjusted-energy total-shares))
+        )
+        (ok (/ (* reward-per-share user-shares) u1000))
+    )
+)
+
+(define-read-only (is-maintenance-overdue
+        (panel-id uint)
+        (maintenance-type (string-ascii 50))
+    )
+    (match (map-get? panel-maintenance-schedule {
+        panel-id: panel-id,
+        maintenance-type: maintenance-type,
+    })
+        scheduled-data (ok (>= stacks-block-height (get due-height scheduled-data)))
+        (ok false)
+    )
+)
+
+(define-read-only (get-total-panel-maintenance-cost (panel-id uint))
+    (let ((maintenance-history (default-to (list) (map-get? panel-maintenance-history panel-id))))
+        (ok (fold sum-maintenance-costs maintenance-history u0))
+    )
+)
+
+(define-private (calculate-efficiency-impact
+        (maintenance-id uint)
+        (current-total uint)
+    )
+    (match (map-get? maintenance-records maintenance-id)
+        maintenance-record (+ current-total (get efficiency-impact maintenance-record))
+        current-total
+    )
+)
+
+(define-private (sum-maintenance-costs
+        (maintenance-id uint)
+        (current-total uint)
+    )
+    (match (map-get? maintenance-records maintenance-id)
+        maintenance-record (+ current-total (get actual-cost maintenance-record))
+        current-total
+    )
 )
