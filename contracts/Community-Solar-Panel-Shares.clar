@@ -199,7 +199,9 @@
         (panel-id uint)
         (energy-amount uint)
     )
-    (let ((panel-data (unwrap! (map-get? panels panel-id) err-not-found)))
+    (begin
+        (try! (sp-guard-ok))
+        (let ((panel-data (unwrap! (map-get? panels panel-id) err-not-found)))
         (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
         (asserts! (get active panel-data) err-panel-inactive)
         (asserts! (> energy-amount u0) err-invalid-amount)
@@ -232,7 +234,8 @@
             )
         )
 
-        (ok energy-amount)
+            (ok energy-amount)
+        )
     )
 )
 
@@ -309,7 +312,9 @@
         (seller principal)
         (shares-amount uint)
     )
-    (let (
+    (begin
+        (try! (sp-guard-ok))
+        (let (
             (offer-data (unwrap!
                 (map-get? share-offers {
                     panel-id: panel-id,
@@ -388,7 +393,8 @@
             )
         )
 
-        (ok shares-amount)
+            (ok shares-amount)
+        )
     )
 )
 
@@ -813,5 +819,87 @@
     (match (map-get? maintenance-records maintenance-id)
         maintenance-record (+ current-total (get actual-cost maintenance-record))
         current-total
+    )
+)
+
+(define-constant sp-err-unauthorized u401)
+(define-constant sp-err-paused u902)
+
+(define-data-var sp-admin (optional principal) none)
+(define-data-var sp-paused bool false)
+(define-data-var sp-maintenance-start (optional uint) none)
+(define-data-var sp-maintenance-end (optional uint) none)
+
+(define-private (sp-is-admin (who principal))
+    (let ((current (default-to who (var-get sp-admin))))
+        (is-eq current who)
+    )
+)
+
+(define-public (sp-set-admin (new-admin principal))
+    (if (sp-is-admin tx-sender)
+        (begin
+            (var-set sp-admin (some new-admin))
+            (ok true)
+        )
+        (err sp-err-unauthorized)
+    )
+)
+
+(define-public (sp-set-paused (p bool))
+    (if (sp-is-admin tx-sender)
+        (begin
+            (var-set sp-paused p)
+            (ok p)
+        )
+        (err sp-err-unauthorized)
+    )
+)
+
+(define-public (sp-schedule-maintenance (start uint) (end uint))
+    (if (sp-is-admin tx-sender)
+        (if (< start end)
+            (begin
+                (var-set sp-maintenance-start (some start))
+                (var-set sp-maintenance-end (some end))
+                (ok true)
+            )
+            (err u400)
+        )
+        (err sp-err-unauthorized)
+    )
+)
+
+(define-public (sp-clear-maintenance)
+    (if (sp-is-admin tx-sender)
+        (begin
+            (var-set sp-maintenance-start none)
+            (var-set sp-maintenance-end none)
+            (ok true)
+        )
+        (err sp-err-unauthorized)
+    )
+)
+
+(define-read-only (sp-maintenance-active)
+    (let ((start (var-get sp-maintenance-start)) (end (var-get sp-maintenance-end)))
+        (match start s
+            (match end e
+                (and (>= stacks-block-height s) (<= stacks-block-height e))
+                false
+            )
+            false
+        )
+    )
+)
+
+(define-read-only (sp-is-paused)
+    (or (var-get sp-paused) (sp-maintenance-active))
+)
+
+(define-read-only (sp-guard-ok)
+    (if (not (or (var-get sp-paused) (sp-maintenance-active)))
+        (ok true)
+        (err sp-err-paused)
     )
 )
