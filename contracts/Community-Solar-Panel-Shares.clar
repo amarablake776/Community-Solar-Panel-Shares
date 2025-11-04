@@ -202,37 +202,37 @@
     (begin
         (try! (sp-guard-ok))
         (let ((panel-data (unwrap! (map-get? panels panel-id) err-not-found)))
-        (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
-        (asserts! (get active panel-data) err-panel-inactive)
-        (asserts! (> energy-amount u0) err-invalid-amount)
+            (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
+            (asserts! (get active panel-data) err-panel-inactive)
+            (asserts! (> energy-amount u0) err-invalid-amount)
 
-        (map-set energy-records {
-            panel-id: panel-id,
-            height: stacks-block-height,
-        }
-            energy-amount
-        )
-
-        (map-set panels panel-id
-            (merge panel-data { energy-produced: (+ (get energy-produced panel-data) energy-amount) })
-        )
-
-        (var-set total-energy-produced
-            (+ (var-get total-energy-produced) energy-amount)
-        )
-
-        (let ((dividend-amount (/ (* energy-amount (var-get dividend-rate)) u100)))
-            (if (> dividend-amount u0)
-                (begin
-                    (map-set dividend-pool panel-id
-                        (+ (default-to u0 (map-get? dividend-pool panel-id))
-                            dividend-amount
-                        ))
-                    (try! (distribute-dividends panel-id))
-                )
-                true
+            (map-set energy-records {
+                panel-id: panel-id,
+                height: stacks-block-height,
+            }
+                energy-amount
             )
-        )
+
+            (map-set panels panel-id
+                (merge panel-data { energy-produced: (+ (get energy-produced panel-data) energy-amount) })
+            )
+
+            (var-set total-energy-produced
+                (+ (var-get total-energy-produced) energy-amount)
+            )
+
+            (let ((dividend-amount (/ (* energy-amount (var-get dividend-rate)) u100)))
+                (if (> dividend-amount u0)
+                    (begin
+                        (map-set dividend-pool panel-id
+                            (+ (default-to u0 (map-get? dividend-pool panel-id))
+                                dividend-amount
+                            ))
+                        (try! (distribute-dividends panel-id))
+                    )
+                    true
+                )
+            )
 
             (ok energy-amount)
         )
@@ -315,83 +315,89 @@
     (begin
         (try! (sp-guard-ok))
         (let (
-            (offer-data (unwrap!
-                (map-get? share-offers {
+                (offer-data (unwrap!
+                    (map-get? share-offers {
+                        panel-id: panel-id,
+                        seller: seller,
+                    })
+                    err-not-found
+                ))
+                (seller-shares-data (unwrap!
+                    (map-get? panel-shares {
+                        panel-id: panel-id,
+                        holder: seller,
+                    })
+                    err-not-found
+                ))
+                (buyer-shares-data (default-to {
+                    shares: u0,
+                    last-claim: stacks-block-height,
+                }
+                    (map-get? panel-shares {
+                        panel-id: panel-id,
+                        holder: tx-sender,
+                    })
+                ))
+                (total-cost (* shares-amount (get price-per-share offer-data)))
+                (seller-total-shares (default-to u0 (map-get? user-total-shares seller)))
+                (buyer-total-shares (default-to u0 (map-get? user-total-shares tx-sender)))
+            )
+            (asserts! (>= (get shares offer-data) shares-amount)
+                err-insufficient-shares
+            )
+            (asserts! (>= (get shares seller-shares-data) shares-amount)
+                err-insufficient-shares
+            )
+            (asserts! (> shares-amount u0) err-invalid-amount)
+
+            (try! (stx-transfer? total-cost tx-sender seller))
+
+            (map-set panel-shares {
+                panel-id: panel-id,
+                holder: seller,
+            }
+                (merge seller-shares-data { shares: (- (get shares seller-shares-data) shares-amount) })
+            )
+
+            (map-set panel-shares {
+                panel-id: panel-id,
+                holder: tx-sender,
+            }
+                (merge buyer-shares-data { shares: (+ (get shares buyer-shares-data) shares-amount) })
+            )
+
+            (map-set user-total-shares seller
+                (- seller-total-shares shares-amount)
+            )
+            (map-set user-total-shares tx-sender
+                (+ buyer-total-shares shares-amount)
+            )
+
+            (let ((current-shareholders (default-to (list) (map-get? shareholder-registry panel-id))))
+                (if (is-none (index-of? current-shareholders tx-sender))
+                    (map-set shareholder-registry panel-id
+                        (unwrap!
+                            (as-max-len? (append current-shareholders tx-sender)
+                                u100
+                            )
+                            err-invalid-amount
+                        ))
+                    true
+                )
+            )
+
+            (if (is-eq (get shares offer-data) shares-amount)
+                (map-delete share-offers {
                     panel-id: panel-id,
                     seller: seller,
                 })
-                err-not-found
-            ))
-            (seller-shares-data (unwrap!
-                (map-get? panel-shares {
+                (map-set share-offers {
                     panel-id: panel-id,
-                    holder: seller,
-                })
-                err-not-found
-            ))
-            (buyer-shares-data (default-to {
-                shares: u0,
-                last-claim: stacks-block-height,
-            }
-                (map-get? panel-shares {
-                    panel-id: panel-id,
-                    holder: tx-sender,
-                })
-            ))
-            (total-cost (* shares-amount (get price-per-share offer-data)))
-            (seller-total-shares (default-to u0 (map-get? user-total-shares seller)))
-            (buyer-total-shares (default-to u0 (map-get? user-total-shares tx-sender)))
-        )
-        (asserts! (>= (get shares offer-data) shares-amount)
-            err-insufficient-shares
-        )
-        (asserts! (>= (get shares seller-shares-data) shares-amount)
-            err-insufficient-shares
-        )
-        (asserts! (> shares-amount u0) err-invalid-amount)
-
-        (try! (stx-transfer? total-cost tx-sender seller))
-
-        (map-set panel-shares {
-            panel-id: panel-id,
-            holder: seller,
-        }
-            (merge seller-shares-data { shares: (- (get shares seller-shares-data) shares-amount) })
-        )
-
-        (map-set panel-shares {
-            panel-id: panel-id,
-            holder: tx-sender,
-        }
-            (merge buyer-shares-data { shares: (+ (get shares buyer-shares-data) shares-amount) })
-        )
-
-        (map-set user-total-shares seller (- seller-total-shares shares-amount))
-        (map-set user-total-shares tx-sender (+ buyer-total-shares shares-amount))
-
-        (let ((current-shareholders (default-to (list) (map-get? shareholder-registry panel-id))))
-            (if (is-none (index-of? current-shareholders tx-sender))
-                (map-set shareholder-registry panel-id
-                    (unwrap!
-                        (as-max-len? (append current-shareholders tx-sender) u100)
-                        err-invalid-amount
-                    ))
-                true
+                    seller: seller,
+                }
+                    (merge offer-data { shares: (- (get shares offer-data) shares-amount) })
+                )
             )
-        )
-
-        (if (is-eq (get shares offer-data) shares-amount)
-            (map-delete share-offers {
-                panel-id: panel-id,
-                seller: seller,
-            })
-            (map-set share-offers {
-                panel-id: panel-id,
-                seller: seller,
-            }
-                (merge offer-data { shares: (- (get shares offer-data) shares-amount) })
-            )
-        )
 
             (ok shares-amount)
         )
@@ -606,7 +612,7 @@
             }))
             err-maintenance-already-scheduled
         )
-        
+
         (map-set panel-maintenance-schedule {
             panel-id: panel-id,
             maintenance-type: maintenance-type,
@@ -617,7 +623,7 @@
             priority: priority,
             scheduled-by: tx-sender,
         })
-        
+
         (ok due-height)
     )
 )
@@ -642,7 +648,7 @@
         (asserts! (get active panel-data) err-panel-inactive)
         (asserts! (> actual-cost u0) err-invalid-amount)
         (asserts! (<= efficiency-impact u100) err-invalid-amount)
-        
+
         ;; Record the maintenance
         (map-set maintenance-records maintenance-id {
             panel-id: panel-id,
@@ -653,15 +659,13 @@
             efficiency-impact: efficiency-impact,
             notes: notes,
         })
-        
+
         ;; Update maintenance history
         (map-set panel-maintenance-history panel-id
-            (unwrap!
-                (as-max-len? (append current-history maintenance-id) u50)
+            (unwrap! (as-max-len? (append current-history maintenance-id) u50)
                 err-invalid-amount
-            )
-        )
-        
+            ))
+
         ;; Remove from scheduled maintenance if it exists
         (if (is-some scheduled-maintenance)
             (map-delete panel-maintenance-schedule {
@@ -670,15 +674,15 @@
             })
             true
         )
-        
+
         ;; Update total maintenance cost
         (var-set total-maintenance-cost
             (+ (var-get total-maintenance-cost) actual-cost)
         )
-        
+
         ;; Increment maintenance ID
         (var-set next-maintenance-id (+ maintenance-id u1))
-        
+
         (ok maintenance-id)
     )
 )
@@ -698,12 +702,12 @@
             ))
         )
         (asserts! (is-eq tx-sender (get owner panel-data)) err-unauthorized)
-        
+
         (map-delete panel-maintenance-schedule {
             panel-id: panel-id,
             maintenance-type: maintenance-type,
         })
-        
+
         (ok true)
     )
 )
@@ -773,7 +777,11 @@
             (maintenance-history (default-to (list) (map-get? panel-maintenance-history panel-id)))
             (total-efficiency-impact (fold calculate-efficiency-impact maintenance-history u0))
             (efficiency-factor (if (> total-efficiency-impact u0)
-                (+ u100 (if (< total-efficiency-impact u50) total-efficiency-impact u50))
+                (+ u100
+                    (if (< total-efficiency-impact u50)
+                        total-efficiency-impact
+                        u50
+                    ))
                 u100
             ))
             (adjusted-energy (/ (* panel-energy efficiency-factor) u100))
@@ -856,7 +864,10 @@
     )
 )
 
-(define-public (sp-schedule-maintenance (start uint) (end uint))
+(define-public (sp-schedule-maintenance
+        (start uint)
+        (end uint)
+    )
     (if (sp-is-admin tx-sender)
         (if (< start end)
             (begin
@@ -882,10 +893,13 @@
 )
 
 (define-read-only (sp-maintenance-active)
-    (let ((start (var-get sp-maintenance-start)) (end (var-get sp-maintenance-end)))
-        (match start s
-            (match end e
-                (and (>= stacks-block-height s) (<= stacks-block-height e))
+    (let (
+            (start (var-get sp-maintenance-start))
+            (end (var-get sp-maintenance-end))
+        )
+        (match start
+            s (match end
+                e (and (>= stacks-block-height s) (<= stacks-block-height e))
                 false
             )
             false
